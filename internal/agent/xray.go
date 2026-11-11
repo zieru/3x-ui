@@ -351,7 +351,10 @@ func (a *Agent) killStrayXray() {
 
 // StartXray renders, tests and (re)starts the xray child process.
 // On test failure the previous config and running process are kept.
+// Before stopping the old Xray, capture its counters into the
+// persistent offsets (stats.go) so the restart cannot lose traffic.
 func (a *Agent) StartXray() error {
+	a.refreshStatsForce()
 	if err := a.writeConfig(); err != nil {
 		return err
 	}

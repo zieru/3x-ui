@@ -108,7 +108,17 @@ func (a *Agent) refreshStats() {
 		return
 	}
 	a.statsMu.Unlock()
+	a.refreshStatsForce()
+}
 
+// refreshStatsForce queries Xray unconditionally, bypassing the cache.
+// StartXray calls this BEFORE stopping Xray: without it, a restart
+// is only detected when a later refresh sees raw < last, and if
+// post-restart traffic already pushed raw past the old last, the
+// restart is invisible and the pre-restart total is lost. Capturing
+// the pre-restart raw first shrinks that window to the milliseconds
+// between the capture and the stop.
+func (a *Agent) refreshStatsForce() {
 	raw := a.queryXrayStats()
 	if raw == nil {
 		return // Xray down / API unreachable: keep last snapshot.

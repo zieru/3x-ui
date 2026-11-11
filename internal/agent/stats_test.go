@@ -82,6 +82,28 @@ func TestMergeRawXrayRestart(t *testing.T) {
 	}
 }
 
+// TestRestartCapture mirrors what StartXray does: force a refresh
+// immediately before the restart, so StatLast holds the freshest
+// pre-restart raw value and the first post-restart refresh folds it
+// into the base instead of losing it.
+func TestRestartCapture(t *testing.T) {
+	a := newTestAgent()
+	a.merge(t, map[string]statPair{"a@x.id": {Up: 1000, Down: 2000}})
+	// Capture just before restart (refreshStatsForce equivalent):
+	// last is now the fresh pre-restart total.
+	a.merge(t, map[string]statPair{"a@x.id": {Up: 1500, Down: 2500}})
+	// Restart: raw resets, then grows a little before the next refresh.
+	a.merge(t, map[string]statPair{"a@x.id": {Up: 50, Down: 80}})
+	if got := a.state.StatBase["a@x.id|uplink"]; got != 1500 {
+		t.Fatalf("base uplink after restart = %d, want 1500 (captured value)", got)
+	}
+	a.statsRaw = map[string]statPair{"a@x.id": {Up: 50, Down: 80}}
+	up, down := a.reportedTraffic("a@x.id")
+	if up != 1550 || down != 2580 {
+		t.Fatalf("reported = %d/%d, want 1550/2580", up, down)
+	}
+}
+
 func TestMergeRawPrunesRemovedClients(t *testing.T) {
 	a := newTestAgent()
 	a.merge(t, map[string]statPair{"a@x.id": {Up: 10, Down: 10}})
