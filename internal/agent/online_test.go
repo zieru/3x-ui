@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -152,5 +153,52 @@ func TestOnlinePrunesRemovedClients(t *testing.T) {
 	_, lastOnline, _, _ := a.onlineSnapshot(time.Unix(1700000001, 0))
 	if _, ok := lastOnline["a@x.id"]; ok {
 		t.Fatalf("lastOnline for removed client was not pruned")
+	}
+}
+
+func TestClientIpsListShape(t *testing.T) {
+	a := newTestAgent()
+	// Empty node must encode as [] (not null, not {}): the master's
+	// DecodeCappedList rejects anything whose first token is not '['.
+	got := a.clientIpsList()
+	if got == nil {
+		t.Fatalf("empty clientIpsList is nil, want []")
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal empty list: %v", err)
+	}
+	if string(raw) != "[]" {
+		t.Fatalf("empty list JSON = %s, want []", raw)
+	}
+	// With live IPs, the shape must decode as a list of
+	// {clientEmail, ips: [{ip, timestamp}]}, sorted by email.
+	a.onlineIPs = map[string][]onlineIP{
+		"b@x.id": {{IP: "5.6.7.8", LastSeen: 1700000001}},
+		"a@x.id": {{IP: "1.2.3.4", LastSeen: 1700000000}},
+	}
+	got = a.clientIpsList()
+	if len(got) != 2 || got[0].ClientEmail != "a@x.id" || got[1].ClientEmail != "b@x.id" {
+		t.Fatalf("clientIpsList = %+v, want [a@x.id b@x.id] sorted", got)
+	}
+	if len(got[0].Ips) != 1 || got[0].Ips[0].IP != "1.2.3.4" || got[0].Ips[0].Timestamp != 1700000000 {
+		t.Fatalf("a@x.id ips = %+v", got[0].Ips)
+	}
+	raw, err = json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal list: %v", err)
+	}
+	if len(raw) == 0 || raw[0] != '[' {
+		t.Fatalf("list JSON must start with '[', got %s", raw)
+	}
+	var decoded []struct {
+		ClientEmail string         `json:"clientEmail"`
+		Ips         []ClientIpEntry `json:"ips"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("list JSON does not decode as []InboundClientIps shape: %v", err)
+	}
+	if len(decoded) != 2 || decoded[0].ClientEmail != "a@x.id" {
+		t.Fatalf("decoded = %+v", decoded)
 	}
 }

@@ -238,10 +238,21 @@ func (a *Agent) renderConfig() ([]byte, error) {
 		Tag:      "api",
 	})
 	cfg := map[string]any{
-		"log":      map[string]any{"loglevel": "warning"},
+		"log": map[string]any{"loglevel": "warning"},
+		// v4.1: prefer IPv6 egress with IPv4 fallback, so clients
+		// see the node's IPv6 address on dual-stack sites. DNS
+		// queries both A and AAAA (UseIP); freedom resolves
+		// IPv6 first and falls back to IPv4 (UseIPv6v4). This
+		// only applies when the client sends a domain — if the
+		// client already resolved to an IPv4 literal, the
+		// outbound connects to that IP as-is.
+		"dns": map[string]any{
+			"servers":       []string{"1.1.1.1", "2606:4700:4700::1111"},
+			"queryStrategy": "UseIP",
+		},
 		"inbounds": inbounds,
 		"outbounds": []map[string]any{
-			{"protocol": "freedom", "tag": "direct"},
+			{"protocol": "freedom", "tag": "direct", "settings": map[string]any{"domainStrategy": "UseIPv6v4"}},
 			{"protocol": "blackhole", "tag": "block"},
 		},
 		"routing": map[string]any{"rules": []map[string]any{

@@ -34,7 +34,7 @@ import (
 // Version is the agent's own version string, reported as panelVersion
 // in GET /server/status. Keep it distinct from the upstream panel
 // version so a master can tell an agent node from a full panel node.
-const Version = "v3.11.0-agent4"
+const Version = "v3.11.0-agent4.2"
 
 // Inbound mirrors the fields of model.Inbound that the master reads
 // back from GET /inbounds/list and pushes via wireInbound().

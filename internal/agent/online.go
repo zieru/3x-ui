@@ -262,16 +262,34 @@ func (a *Agent) clientIpsByGuid() map[string]map[string][]ClientIpEntry {
 	return out
 }
 
-// clientIpsFlat is the flat email -> entries view of the same
-// snapshot, for GET /server/clientIps.
-func (a *Agent) clientIpsFlat() map[string][]ClientIpEntry {
+// InboundClientIps mirrors model.InboundClientIps as the master
+// decodes it (upstream internal/web/runtime/remote.go,
+// FetchAllClientIps): a JSON LIST of {clientEmail, ips:
+// [{ip, timestamp}]}. The master's DecodeCappedList requires the
+// first token to be '[', so returning a map here fails every sync
+// tick with "expected a JSON array" — the 580x "fetch client ips
+// from sgnat failed" warnings seen 12 Nov 2026.
+type InboundClientIps struct {
+	ClientEmail string          `json:"clientEmail"`
+	Ips         []ClientIpEntry `json:"ips"`
+}
+
+// clientIpsList is the flat list view of the same live-IP snapshot
+// clientIpsByGuid reports per GUID, for GET /server/clientIps.
+// Sorted by email for determinism; never nil, so an idle node
+// returns [] (decodes cleanly) instead of null or {}.
+func (a *Agent) clientIpsList() []InboundClientIps {
 	byGuid := a.clientIpsByGuid()
-	out := map[string][]ClientIpEntry{}
+	out := make([]InboundClientIps, 0)
 	for _, inner := range byGuid {
 		for email, entries := range inner {
-			out[email] = entries
+			if len(entries) == 0 {
+				entries = []ClientIpEntry{}
+			}
+			out = append(out, InboundClientIps{ClientEmail: email, Ips: entries})
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ClientEmail < out[j].ClientEmail })
 	return out
 }
 

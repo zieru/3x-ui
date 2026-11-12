@@ -129,9 +129,11 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, path string, b
 		writeEnvelope(w, true, "", []any{})
 		return
 	case method == "GET" && path == "server/clientIps":
-		// Flat email -> [{ip, timestamp}] view of the same live-IP
-		// snapshot clientIpsByGuid reports per GUID.
-		writeEnvelope(w, true, "", s.agent.clientIpsFlat())
+		// List [{clientEmail, ips: [{ip, timestamp}]}] — the shape
+		// the master's FetchAllClientIps decodes (see
+		// InboundClientIps in online.go). A map here fails its
+		// DecodeCappedList on every sync tick.
+		writeEnvelope(w, true, "", s.agent.clientIpsList())
 		return
 	case method == "POST" && path == "server/clientIps":
 		writeEnvelope(w, true, "", nil)
