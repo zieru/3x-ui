@@ -1,0 +1,34 @@
+#!/sbin/openrc-run
+# /etc/init.d/x-ui-agent — sgnat, Alpine Linux / OpenRC (no systemd).
+#
+# Install:
+#   cp deploy/x-ui-agent.rc /etc/init.d/x-ui-agent
+#   chmod +x /etc/init.d/x-ui-agent
+#   rc-update add x-ui-agent default
+#   rc-service x-ui-agent start
+#
+# The node-sync token lives in /etc/x-ui-agent/token (0600). If it
+# does not exist, the agent generates one once at first start and
+# prints it to the log — copy it to the master panel as the node's
+# API token (Settings -> API Tokens is not used on the agent; the
+# master stores this plaintext token).
+
+command="/usr/local/x-ui-agent/x-ui-agent"
+command_args="-listen :2053 -state-dir /etc/x-ui-agent -xray-bin /usr/local/x-ui-agent/bin/xray-linux-amd64"
+command_background=true
+pidfile="/run/x-ui-agent.pid"
+description="x-ui mini node agent"
+procname="x-ui-agent"
+
+depend() {
+    need net
+    after tailscale
+}
+
+start_pre() {
+    export GOGC=50
+    export GOMEMLIMIT=32MiB
+    checkpath -d -m 0700 -o root:root /etc/x-ui-agent
+    checkpath -d -m 0750 -o root:root /var/log/x-ui-agent
+    checkpath -d -m 0755 -o root:root /usr/local/x-ui-agent/bin
+}
