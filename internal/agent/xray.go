@@ -269,11 +269,10 @@ func (a *Agent) renderConfig() ([]byte, error) {
 			"statsUserUplink": true, "statsUserDownlink": true,
 			// v3: statsUserOnline feeds the connection-based online
 			// signal (xray api statsonlineiplist / GetUsersStats).
-			// Upstream forces it on in the panel config too. On Xray
-			// 26.10.21 the CLI still returns no live users (verified
-			// locally, see online.go), so v3 does not depend on it —
-			// the traffic-delta signal is primary — but enabling it
-			// costs nothing and a future core may populate it.
+			// Upstream forces it on in the panel config too.
+			// (An earlier sandbox test returned no live users;
+			// the live node DOES report them — see online.go —
+			// so the signal is real in production.)
 			"statsUserOnline": true}}},
 		"api":   map[string]any{"tag": "api", "services": []string{"HandlerService", "LoggerService", "StatsService"}},
 		"stats": map[string]any{},
@@ -314,9 +313,16 @@ func (a *Agent) testConfigFile(path string) error {
 	if _, err := os.Stat(a.xrayBin); err != nil {
 		return nil
 	}
+	return testConfigWithBin(a.xrayBin, path)
+}
+
+// testConfigWithBin runs `bin -test -c <path>` (30 s timeout). The
+// updater smoke-tests a STAGED core binary with it before swapping:
+// a new core that rejects the live config must never go live.
+func testConfigWithBin(bin, path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, a.xrayBin, "-test", "-c", path)
+	cmd := exec.CommandContext(ctx, bin, "-test", "-c", path)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("xray -test failed: %w: %s", err, strings.TrimSpace(string(out)))

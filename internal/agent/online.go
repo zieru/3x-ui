@@ -22,19 +22,19 @@
 // and unions whatever it returns into the delta signal — exactly
 // like upstream unions the two signals.
 //
-// Honest caveat, verified 2026-11-11 on Xray 26.10.21 (local test
-// server + client, statsUserOnline:true, 24 s held connection
-// actively transferring): `statsonlineiplist -all` returned `{}` and
-// the `user>>>email>>>online` stat never appeared (`NotFound` on
-// every poll). The connection-based signal is unobservable on this
-// core version in this configuration, so v3 does NOT depend on it:
-// the delta signal alone makes an actively-using client show online
-// in the panel, which is the reported case (Ahmad connects and uses
-// traffic). The CLI query is kept as a best-effort union — if a
-// future core populates it, idle clients and client IPs appear too —
-// and statsUserOnline is enabled in the rendered config (upstream
-// forces it on for the same reason). If the CLI ever returns users,
-// the parser below accepts both protojson casings.
+// Corrected 2026-11-13: the caveat below was WRONG for the live box.
+// A direct check on sgnat (2026-11-13 09:41 WIB) showed
+// `statsonlineiplist -all` DOES return live client IPs, and the
+// agent's clientIps/clientIpsByGuid endpoints serve the same data
+// the panel IP Log shows. The 2026-11-11 sandbox test that returned
+// `{}` must have differed from the live configuration somehow; do
+// not treat it as evidence. The connection-based IP signal IS
+// observable on Xray 26.10.21 in production. Both signals are live:
+// the delta signal marks actively-using clients online, and the CLI
+// query adds idle-but-connected clients plus their IPs.
+// statsUserOnline stays enabled in the rendered config (upstream
+// forces it on for the same reason). The parser below accepts both
+// protojson casings.
 
 package agent
 

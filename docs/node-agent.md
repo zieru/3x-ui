@@ -187,6 +187,70 @@ Mechanics (see `internal/agent/hotapply.go`):
   parses the `Added N user(s) in total.` / `Removed N user(s) in
   total.` line and treats any mismatch as a failure.
 
+## Self-update from GitHub Releases (v6, combined agent + core)
+
+Builds ship from GitHub Actions, and the agent installs them itself —
+both its own binary and the pinned Xray core binary:
+
+- `.github/workflows/agent-release.yml` runs on every push to an
+  `agent-v*` branch that touches agent code: vet + tests, then a
+  static build (`CGO_ENABLED=0`, linux/amd64), then it fetches the
+  pinned Xray core (see below) and publishes six assets to the
+  floating `agent-latest` release: the agent binary, its `.sha256`,
+  and `version.txt`, plus the core binary, its `.sha256`, and
+  `core-version.txt`. `.github/workflows/agent-ci.yml` runs vet +
+  tests only. The connector token cannot push workflow files (403,
+  no `workflow` scope) — workflow files are added by the operator
+  via the GitHub web UI.
+- The pinned core version lives in
+  `internal/agent/xray-core-version.txt` (single line, e.g.
+  `26.11.9`). It is bumped only after the new core's compatibility
+  with the agent is verified: adu/rmu output lines, statsquery and
+  statsonlineiplist shapes, `xray -test` against the rendered
+  config, and client handshakes (XHTTP+TLS and Reality) from the
+  client versions in use. The workflow downloads the matching
+  `Xray-linux-64.zip` from the upstream release, verifies its
+  SHA2-256 against the published `.dgst`, and checks the extracted
+  binary reports the pinned version.
+- The agent polls the release every 6 hours (first check 5 minutes
+  after start). The agent binary installs when `version.txt` is
+  newer than the running `Version`; the core installs when the pin
+  differs from the installed core binary — the pin wins over
+  "newer", so a lowered pin deliberately downgrades. Each wanted
+  artifact is downloaded, SHA-256 verified, and smoke-tested
+  before anything is replaced: the staged agent binary must pass
+  `-version`, and the staged core binary must report the pinned
+  version AND pass `xray -test` against the live config. Then both
+  are installed over the live binaries (keeping `.bak` copies),
+  Xray is stopped, and the agent re-execs itself — same PID, so
+  OpenRC keeps tracking it. A failed verification installs
+  nothing.
+- Two gates, both files under the state dir: the marker file
+  `autoupdate` (presence enables installing) and `github-token`
+  (0600, a fine-grained PAT with Contents: Read on zieru/3x-ui —
+  required because the repository is private). Without the token
+  the updater stays dormant; without the marker the background
+  loop only checks.
+- Manual endpoints (Bearer auth, same as the rest of the API):
+  `POST server/checkUpdate` (read-only, no marker needed) and
+  `POST server/applyUpdate` with optional `{"force":true}` to
+  reinstall the same versions. `server/status` reports
+  `updateAvailable`, `latestVersion`, `autoUpdate`,
+  `coreUpdateAvailable`, and `latestCoreVersion`.
+  `server/updatePanel` stays refused: the panel's "Update node"
+  button must never drive updates.
+- Core compatibility matrix (verified in the sandbox 2026-11-13
+  for the 26.11.9 pin): `xray -test` passes on a sgnat-like
+  config; statsquery / statsonlineiplist / inboundusercount
+  shapes unchanged; adu prints `Added N user(s) in total.` and
+  rmu prints `Removed N user(s) in total.` exactly as the agent's
+  parser expects; XHTTP+TLS and Reality handshakes from 26.10.21
+  clients succeed. One caveat: `statsonlineiplist` returns `{}` in
+  the sandbox on both 26.10.21 and 26.11.9 (it returns live IPs on
+  the production node), so the IP listing must be re-verified on
+  the node after any core swap, with the `.bak` core ready for
+  rollback.
+
 ## Outbound stats are NOT an agent problem
 
 `sgnat-out` (the VLESS outbound from the nyetrum panel to sgnat)

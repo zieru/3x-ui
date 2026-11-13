@@ -18,14 +18,24 @@ import (
 	"time"
 )
 
-// update.go — v6 self-update from GitHub Releases.
+// update.go — v6 self-update from GitHub Releases (agent + core).
 //
 // The GitHub Actions workflow (.github/workflows/agent-release.yml)
 // builds the agent on every push to an agent-v* branch and publishes
-// the binary to the floating `agent-latest` release. This updater
-// polls that release, and when it carries a newer version it
-// downloads the binary, verifies its SHA-256 checksum and smoke-tests
-// it, installs it over the running executable, and re-execs itself.
+// the agent binary AND the pinned Xray core binary to the floating
+// `agent-latest` release. This updater polls that release, and when
+// it carries a newer agent version or a different pinned core
+// version, it downloads the artifacts, verifies their SHA-256
+// checksums and smoke-tests them, installs them over the live
+// binaries, and re-execs itself.
+//
+// The core version is PINNED by the release (core-version.txt), not
+// "whatever upstream published last": the agent depends on exact
+// Xray CLI behaviors (adu/rmu output, statsquery, statsonlineiplist),
+// so a core version is only pinned after its compatibility is
+// verified. The pin wins over "newer" — a lowered pin deliberately
+// downgrades the core. Security fixes flow by bumping the pin and
+// cutting a release; nodes pick it up within one check interval.
 //
 // The repository is PRIVATE, so the GitHub API needs a token: a
 // fine-grained PAT with Contents: Read on zieru/3x-ui, stored 0600
@@ -41,28 +51,33 @@ import (
 // never drive this (see server.go).
 
 const (
-	updateRepoOwner = "zieru"
-	updateRepoName  = "3x-ui"
-	updateTag       = "agent-latest"
-	updateBinName   = "x-ui-agent-linux-amd64"
-	updateCheckURL  = "https://api.github.com/repos/" + updateRepoOwner + "/" + updateRepoName + "/releases/tags/" + updateTag
+	updateRepoOwner       = "zieru"
+	updateRepoName        = "3x-ui"
+	updateTag             = "agent-latest"
+	updateBinName         = "x-ui-agent-linux-amd64"
+	updateCoreBinName     = "xray-linux-amd64"
+	updateCoreVersionFile = "core-version.txt"
+	updateCheckURL        = "https://api.github.com/repos/" + updateRepoOwner + "/" + updateRepoName + "/releases/tags/" + updateTag
 
 	updateMarkerFile = "autoupdate"
 	updateTokenFile  = "github-token"
 
 	updateCheckInterval = 6 * time.Hour
 	updateFirstDelay    = 5 * time.Minute
-	updateMaxDownload   = 64 << 20 // binary is ~7 MB; 64 MB is a sanity cap
+	updateMaxDownload   = 64 << 20 // agent ~7 MB, core ~35 MB; 64 MB is a sanity cap
 )
 
 // updateStatus is the cached result of the last release check.
 type updateStatus struct {
-	CheckedAt   time.Time
-	Latest      string
-	Available   bool
-	LastError   string
-	NoToken     bool
-	LastApplied time.Time
+	CheckedAt     time.Time
+	Latest        string
+	Available     bool
+	CoreInstalled string
+	CoreLatest    string
+	CoreAvailable bool
+	LastError     string
+	NoToken       bool
+	LastApplied   time.Time
 }
 
 // compareAgentVersions compares "v3.11.0-agent6" style versions by
@@ -135,6 +150,92 @@ func agentVersionSegments(v string) []int {
 		out = append(out, n)
 	}
 	return out
+}
+
+// compareCoreVersions compares dotted numeric versions like
+// "26.10.21" < "26.11.9" (numeric per segment, missing segments
+// count as 0). A leading "v" and a trailing non-numeric tail per
+// segment are tolerated. Unparseable versions sort below parseable
+// ones, mirroring compareAgentVersions. Returns -1, 0 or 1.
+func compareCoreVersions(a, b string) int {
+	as := dottedVersionSegments(a)
+	bs := dottedVersionSegments(b)
+	if as == nil && bs == nil {
+		if a == b {
+			return 0
+		}
+		return strings.Compare(a, b)
+	}
+	if as == nil {
+		return -1
+	}
+	if bs == nil {
+		return 1
+	}
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var av, bv int
+		if i < len(as) {
+			av = as[i]
+		}
+		if i < len(bs) {
+			bv = bs[i]
+		}
+		if av != bv {
+			if av < bv {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// dottedVersionSegments extracts the numeric segments of a dotted
+// version string. Returns nil when there is no parseable segment.
+func dottedVersionSegments(v string) []int {
+	v = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(v), "v"))
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ".")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		digits := ""
+		for _, r := range p {
+			if r < '0' || r > '9' {
+				break
+			}
+			digits += string(r)
+		}
+		if digits == "" {
+			return nil
+		}
+		n, err := strconv.Atoi(digits)
+		if err != nil {
+			return nil
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// installPlan says which release artifacts an update installs.
+type installPlan struct{ agent, core bool }
+
+// planInstall decides from a fresh check status: the agent binary
+// installs when a newer agent version is available (or force); the
+// core installs when the release carries core assets and the pinned
+// core differs from the installed one (or force). The pin wins over
+// "newer": a lowered pin downgrades the core deliberately.
+func planInstall(st updateStatus, force, releaseHasCore bool) installPlan {
+	var p installPlan
+	if st.Available || force {
+		p.agent = true
+	}
+	if releaseHasCore && (st.CoreAvailable || force) {
+		p.core = true
+	}
+	return p
 }
 
 type releaseAsset struct {
@@ -313,16 +414,36 @@ func (a *Agent) CheckUpdateNow() updateStatus {
 	latest := strings.TrimSpace(string(verRaw))
 	st.Latest = latest
 	st.Available = compareAgentVersions(Version, latest) < 0
+	// Pinned core version: optional — an agent-only release has no
+	// core-version.txt asset, and a failed fetch must not fail the
+	// agent check. The core installs when the pin differs from the
+	// installed binary (pin wins, either direction).
+	st.CoreInstalled = ""
+	st.CoreLatest = ""
+	st.CoreAvailable = false
+	if coreURL, ok := rel.asset(updateCoreVersionFile); ok {
+		if coreRaw, err := fetchURL(ctx, client, coreURL); err == nil {
+			st.CoreLatest = strings.TrimSpace(string(coreRaw))
+		}
+	}
+	if st.CoreLatest != "" {
+		installed := detectXrayVersion(a.xrayBin)
+		st.CoreInstalled = installed
+		if installed != "" {
+			st.CoreAvailable = compareCoreVersions(installed, st.CoreLatest) != 0
+		}
+	}
 	a.updateState = st
 	return st
 }
 
-// ApplyUpdate downloads, verifies and installs the latest release,
-// then re-execs the agent. force installs even when the release
-// version equals the running one (recovery / pipeline proof). It
-// returns nil only when no install was needed; a successful install
-// never returns (the process image is replaced). Callers that need a
-// reply (HTTP) must respond before calling this in a goroutine.
+// ApplyUpdate downloads, verifies and installs the latest release
+// artifacts (agent binary and/or pinned core binary), then re-execs
+// the agent. force installs even when the release versions equal the
+// running ones (recovery / pipeline proof). It returns nil only when
+// no install was needed; a successful install never returns (the
+// process image is replaced). Callers that need a reply (HTTP) must
+// respond before calling this in a goroutine.
 func (a *Agent) ApplyUpdate(force bool) error {
 	if !a.autoUpdateEnabled() {
 		return fmt.Errorf("autoupdate is not enabled (missing %s marker file)", updateMarkerFile)
@@ -334,14 +455,18 @@ func (a *Agent) ApplyUpdate(force bool) error {
 	if st.LastError != "" {
 		return fmt.Errorf("update check failed: %s", st.LastError)
 	}
-	if !st.Available && !force {
+	if !st.Available && !st.CoreAvailable && !force {
 		return nil // already current; not an error
 	}
-	if err := a.installRelease(st.Latest); err != nil {
+	plan, err := a.installRelease(st, force)
+	if err != nil {
 		return err
 	}
-	// installRelease replaced the executable on disk. Stop Xray so
-	// the new process starts clean (no orphan holding the ports),
+	if !plan.agent && !plan.core {
+		return nil // nothing was wanted after all; not an error
+	}
+	// installRelease replaced binaries on disk. Stop Xray so the
+	// new process starts clean (no orphan holding the ports),
 	// persist state, then replace this process image: same PID, so
 	// OpenRC keeps tracking it and the API port never closes
 	// longer than the exec takes.
@@ -349,93 +474,177 @@ func (a *Agent) ApplyUpdate(force bool) error {
 	exe, err := os.Executable()
 	if err != nil {
 		// Last resort: restart Xray under the old image; the new
-		// binary takes over at the next agent restart.
+		// binaries take over at the next agent restart.
 		_ = a.StartXray()
-		return fmt.Errorf("os.Executable: %w (new binary installed, takes effect on next agent restart)", err)
+		return fmt.Errorf("os.Executable: %w (new binaries installed, take effect on next agent restart)", err)
 	}
-	log.Printf("autoupdate: installed %s, re-execing", st.Latest)
+	if plan.core {
+		log.Printf("autoupdate: installed agent %s + core %s, re-execing", st.Latest, st.CoreLatest)
+	} else {
+		log.Printf("autoupdate: installed %s, re-execing", st.Latest)
+	}
 	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
 		_ = a.StartXray()
-		return fmt.Errorf("re-exec %s: %w (new binary installed, takes effect on next agent restart)", exe, err)
+		return fmt.Errorf("re-exec %s: %w (new binaries installed, take effect on next agent restart)", exe, err)
 	}
 	return nil // unreachable
 }
 
-// installRelease downloads the release binary + checksum, verifies
-// both, smoke-tests the binary, and atomically installs it over the
-// running executable (keeping a .bak copy of the previous binary).
-func (a *Agent) installRelease(expectVersion string) error {
+// installRelease downloads the wanted release artifacts, verifies
+// their checksums, smoke-tests each staged artifact, and swaps them
+// into place, keeping .bak copies of the previous binaries. All
+// downloads, verifications and smoke tests complete before anything
+// on disk is replaced, so a failed check never leaves a partial
+// install. A swap-phase failure can still leave one artifact
+// replaced; both artifacts come from the same verified release and
+// the next check converges the remainder, so this is safe.
+func (a *Agent) installRelease(st updateStatus, force bool) (installPlan, error) {
+	var none installPlan
 	token, err := a.githubToken()
 	if err != nil {
-		return err
+		return none, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	client := githubClient(token)
 	raw, err := fetchURL(ctx, client, updateCheckURL)
 	if err != nil {
-		return fmt.Errorf("fetch release: %w", err)
+		return none, fmt.Errorf("fetch release: %w", err)
 	}
 	var rel releaseInfo
 	if err := json.Unmarshal(raw, &rel); err != nil {
-		return fmt.Errorf("parse release: %w", err)
+		return none, fmt.Errorf("parse release: %w", err)
 	}
-	binURL, ok := rel.asset(updateBinName)
-	if !ok {
-		return fmt.Errorf("release has no %s asset", updateBinName)
+	_, hasCore := rel.asset(updateCoreVersionFile)
+	plan := planInstall(st, force, hasCore)
+	if !plan.agent && !plan.core {
+		return none, nil
 	}
-	sumURL, ok := rel.asset(updateBinName + ".sha256")
-	if !ok {
-		return fmt.Errorf("release has no %s.sha256 asset", updateBinName)
+
+	downloadArtifact := func(name string) ([]byte, error) {
+		binURL, ok := rel.asset(name)
+		if !ok {
+			return nil, fmt.Errorf("release has no %s asset", name)
+		}
+		sumURL, ok := rel.asset(name + ".sha256")
+		if !ok {
+			return nil, fmt.Errorf("release has no %s.sha256 asset", name)
+		}
+		bin, err := fetchURL(ctx, client, binURL)
+		if err != nil {
+			return nil, fmt.Errorf("download %s: %w", name, err)
+		}
+		sumDoc, err := fetchURL(ctx, client, sumURL)
+		if err != nil {
+			return nil, fmt.Errorf("download %s checksum: %w", name, err)
+		}
+		if err := verifyChecksum(bin, string(sumDoc)); err != nil {
+			return nil, fmt.Errorf("verify %s: %w", name, err)
+		}
+		return bin, nil
 	}
-	bin, err := fetchURL(ctx, client, binURL)
-	if err != nil {
-		return fmt.Errorf("download binary: %w", err)
+
+	type staged struct{ staging, dest string }
+	var stages []staged
+	cleanup := func() {
+		for _, s := range stages {
+			_ = os.Remove(s.staging)
+		}
 	}
-	sumDoc, err := fetchURL(ctx, client, sumURL)
-	if err != nil {
-		return fmt.Errorf("download checksum: %w", err)
+	if plan.agent {
+		bin, err := downloadArtifact(updateBinName)
+		if err != nil {
+			return none, err
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			return none, fmt.Errorf("os.Executable: %w", err)
+		}
+		staging := filepath.Join(filepath.Dir(exe), filepath.Base(exe)+".new")
+		if err := os.WriteFile(staging, bin, 0o755); err != nil {
+			return none, fmt.Errorf("write staging agent binary: %w", err)
+		}
+		stages = append(stages, staged{staging, exe})
+		if err := smokeTestAgent(staging, st.Latest); err != nil {
+			cleanup()
+			return none, err
+		}
 	}
-	if err := verifyChecksum(bin, string(sumDoc)); err != nil {
-		return fmt.Errorf("verify binary: %w", err)
+	if plan.core {
+		if a.xrayBin == "" {
+			cleanup()
+			return none, fmt.Errorf("core update wanted but no xray binary is configured")
+		}
+		bin, err := downloadArtifact(updateCoreBinName)
+		if err != nil {
+			cleanup()
+			return none, err
+		}
+		staging := filepath.Join(filepath.Dir(a.xrayBin), filepath.Base(a.xrayBin)+".new")
+		if err := os.WriteFile(staging, bin, 0o755); err != nil {
+			cleanup()
+			return none, fmt.Errorf("write staging core binary: %w", err)
+		}
+		stages = append(stages, staged{staging, a.xrayBin})
+		if err := a.smokeTestCore(staging, st.CoreLatest); err != nil {
+			cleanup()
+			return none, err
+		}
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("os.Executable: %w", err)
-	}
-	dir := filepath.Dir(exe)
-	staging := filepath.Join(dir, filepath.Base(exe)+".new")
-	if err := os.WriteFile(staging, bin, 0o755); err != nil {
-		return fmt.Errorf("write staging binary: %w", err)
-	}
-	// Smoke test: the staged binary must run and report the
-	// expected version. A binary that cannot even do that must
-	// never replace the live one.
-	smokeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(smokeCtx, staging, "-version").CombinedOutput()
-	if err != nil {
-		_ = os.Remove(staging)
-		return fmt.Errorf("smoke test %s -version: %w: %s", staging, err, strings.TrimSpace(string(out)))
-	}
-	if !strings.Contains(string(out), expectVersion) {
-		_ = os.Remove(staging)
-		return fmt.Errorf("smoke test: staged binary reports %q, want %q", strings.TrimSpace(string(out)), expectVersion)
-	}
-	// Keep a backup of the running binary, then swap. Renaming over
-	// a running executable is safe on Linux (the old inode stays
-	// alive for the running process).
-	bak := exe + ".bak"
-	if cur, err := os.ReadFile(exe); err == nil {
-		_ = os.WriteFile(bak, cur, 0o755)
-	}
-	if err := os.Rename(staging, exe); err != nil {
-		_ = os.Remove(staging)
-		return fmt.Errorf("install binary: %w", err)
+	// Swap: keep a backup of each live binary, then rename the
+	// staged file over it. Renaming over a running executable is
+	// safe on Linux (the old inode stays alive for the running
+	// process).
+	for _, s := range stages {
+		bak := s.dest + ".bak"
+		if cur, err := os.ReadFile(s.dest); err == nil {
+			_ = os.WriteFile(bak, cur, 0o755)
+		}
+		if err := os.Rename(s.staging, s.dest); err != nil {
+			cleanup()
+			return none, fmt.Errorf("install %s: %w", s.dest, err)
+		}
 	}
 	a.updateMu.Lock()
 	a.updateState.LastApplied = time.Now()
 	a.updateMu.Unlock()
+	return plan, nil
+}
+
+// smokeTestAgent runs the staged agent binary with -version: it must
+// run and report the expected version. A binary that cannot even do
+// that must never replace the live one.
+func smokeTestAgent(staging, expectVersion string) error {
+	smokeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(smokeCtx, staging, "-version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("smoke test %s -version: %w: %s", staging, err, strings.TrimSpace(string(out)))
+	}
+	if !strings.Contains(string(out), expectVersion) {
+		return fmt.Errorf("smoke test: staged binary reports %q, want %q", strings.TrimSpace(string(out)), expectVersion)
+	}
+	return nil
+}
+
+// smokeTestCore verifies a staged Xray core binary: it must report
+// the expected version, and it must validate the live config
+// (proving the new core accepts the config the agent renders). When
+// no config file exists yet, only the version check runs.
+func (a *Agent) smokeTestCore(staging, expectCore string) error {
+	got := detectXrayVersion(staging)
+	if got == "" {
+		return fmt.Errorf("smoke test: staged core %s did not report a version", staging)
+	}
+	if compareCoreVersions(got, expectCore) != 0 {
+		return fmt.Errorf("smoke test: staged core reports %q, want %q", got, expectCore)
+	}
+	if _, err := os.Stat(a.configPath); err != nil {
+		return nil
+	}
+	if err := testConfigWithBin(staging, a.configPath); err != nil {
+		return fmt.Errorf("smoke test: staged core rejects live config: %w", err)
+	}
 	return nil
 }
 
@@ -463,10 +672,10 @@ func (a *Agent) StartUpdater() {
 				log.Printf("autoupdate: check failed: %s", st.LastError)
 				continue
 			}
-			if !st.Available {
+			if !st.Available && !st.CoreAvailable {
 				continue
 			}
-			log.Printf("autoupdate: %s available (running %s), installing", st.Latest, Version)
+			log.Printf("autoupdate: agent %s (running %s), core %s (installed %s), installing", st.Latest, Version, st.CoreLatest, st.CoreInstalled)
 			// ApplyUpdate re-execs on success and never returns.
 			// On failure it returns an error; keep serving.
 			if err := a.ApplyUpdate(false); err != nil {

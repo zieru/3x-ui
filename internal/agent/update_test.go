@@ -22,7 +22,7 @@ func TestCompareAgentVersions(t *testing.T) {
 		{"v3.11.0-agent6.1", "v3.11.0-agent6.1", 0},
 		{"v3.11.0-agent6.10", "v3.11.0-agent6.9", 1}, // numeric, not lexical
 		{"v3.11.0-agent10", "v3.11.0-agent9", 1},
-		{"dev", "v3.11.0-agent6", -1},    // unparseable sorts below releases
+		{"dev", "v3.11.0-agent6", -1}, // unparseable sorts below releases
 		{"v3.11.0-agent6", "dev", 1},
 		{"", "v3.11.0-agent6", -1},
 	}
@@ -30,6 +30,92 @@ func TestCompareAgentVersions(t *testing.T) {
 		if got := compareAgentVersions(c.a, c.b); got != c.want {
 			t.Fatalf("compareAgentVersions(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+func TestCompareCoreVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"26.10.21", "26.10.21", 0},
+		{"26.10.21", "26.11.9", -1},
+		{"26.11.9", "26.10.21", 1},
+		{"26.10.31", "26.11.9", -1},
+		{"26.11.9", "26.11.10", -1},  // numeric, not lexical
+		{"v26.11.9", "26.11.9", 0},   // leading v tolerated
+		{"26.11", "26.11.0", 0},      // missing segment counts as 0
+		{"26.11.9rc1", "26.11.9", 0}, // trailing tail tolerated
+		{"", "26.11.9", -1},          // unparseable sorts below
+		{"26.11.9", "", 1},
+		{"garbage", "26.11.9", -1},
+	}
+	for _, c := range cases {
+		if got := compareCoreVersions(c.a, c.b); got != c.want {
+			t.Fatalf("compareCoreVersions(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestPlanInstall(t *testing.T) {
+	cases := []struct {
+		name    string
+		st      updateStatus
+		force   bool
+		hasCore bool
+		want    installPlan
+	}{
+		{"nothing", updateStatus{}, false, true, installPlan{}},
+		{"agent only", updateStatus{Available: true}, false, true, installPlan{agent: true}},
+		{"core only", updateStatus{CoreAvailable: true}, false, true, installPlan{core: true}},
+		{"both", updateStatus{Available: true, CoreAvailable: true}, false, true, installPlan{true, true}},
+		{"core wanted but release has no core assets", updateStatus{CoreAvailable: true}, false, false, installPlan{}},
+		{"force installs both when core present", updateStatus{}, true, true, installPlan{true, true}},
+		{"force with agent-only release", updateStatus{}, true, false, installPlan{agent: true}},
+	}
+	for _, c := range cases {
+		if got := planInstall(c.st, c.force, c.hasCore); got != c.want {
+			t.Fatalf("%s: planInstall = %+v, want %+v", c.name, got, c.want)
+		}
+	}
+}
+
+func writeFakeXray(t *testing.T, dir, output string) string {
+	t.Helper()
+	path := filepath.Join(dir, "xray-fake")
+	script := "#!/bin/sh\necho '" + output + "'\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestDetectXrayVersion(t *testing.T) {
+	if got := detectXrayVersion(""); got != "" {
+		t.Fatalf("empty bin = %q", got)
+	}
+	if got := detectXrayVersion(filepath.Join(t.TempDir(), "nope")); got != "" {
+		t.Fatalf("missing bin = %q", got)
+	}
+	fake := writeFakeXray(t, t.TempDir(), "Xray 26.11.9 (Xray, Penetrates Everything.) 676eaf6 (go1.27.3 linux/amd64)")
+	if got := detectXrayVersion(fake); got != "26.11.9" {
+		t.Fatalf("fake xray version = %q, want 26.11.9", got)
+	}
+}
+
+func TestSmokeTestCore(t *testing.T) {
+	dir := t.TempDir()
+	// No config file: only the version check runs.
+	a := &Agent{configPath: filepath.Join(dir, "missing.json")}
+	fake := writeFakeXray(t, dir, "Xray 26.11.9 (Xray, Penetrates Everything.) x")
+	if err := a.smokeTestCore(fake, "26.11.9"); err != nil {
+		t.Fatalf("matching core rejected: %v", err)
+	}
+	if err := a.smokeTestCore(fake, "26.10.21"); err == nil {
+		t.Fatalf("mismatched core passed smoke test")
+	}
+	if err := a.smokeTestCore(filepath.Join(dir, "nope"), "26.11.9"); err == nil {
+		t.Fatalf("non-running binary passed smoke test")
 	}
 }
 

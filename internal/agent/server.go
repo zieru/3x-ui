@@ -135,12 +135,15 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, path string, b
 		// report whether a newer version exists. Read-only.
 		st := s.agent.CheckUpdateNow()
 		writeEnvelope(w, true, "", map[string]any{
-			"current":   Version,
-			"latest":    st.Latest,
-			"available": st.Available,
-			"noToken":   st.NoToken,
-			"error":     st.LastError,
-			"checkedAt": st.CheckedAt.Unix(),
+			"current":       Version,
+			"latest":        st.Latest,
+			"available":     st.Available,
+			"coreInstalled": st.CoreInstalled,
+			"coreLatest":    st.CoreLatest,
+			"coreAvailable": st.CoreAvailable,
+			"noToken":       st.NoToken,
+			"error":         st.LastError,
+			"checkedAt":     st.CheckedAt.Unix(),
 		})
 		return
 	case method == "POST" && path == "server/applyUpdate":

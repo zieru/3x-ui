@@ -30,6 +30,9 @@ type statusSnapshot struct {
 	UpdateAvailable bool   `json:"updateAvailable"`
 	LatestVersion   string `json:"latestVersion"`
 	AutoUpdate      bool   `json:"autoUpdate"`
+	// Pinned-core update state (v6 combined updater).
+	CoreUpdateAvailable bool   `json:"coreUpdateAvailable"`
+	LatestCoreVersion   string `json:"latestCoreVersion"`
 }
 
 type memInfo struct {
@@ -174,19 +177,21 @@ func (a *Agent) Status() statusSnapshot {
 	a.mu.Unlock()
 	upd := a.getUpdateStatus()
 	return statusSnapshot{
-		CPU:          readCPUPercent(),
-		CPUCores:     1,
-		Mem:          memInfo{Current: memUsed, Total: memTotal},
-		Swap:         memInfo{Current: swapTotal - swapFree, Total: swapTotal},
-		Disk:         memInfo{Current: diskUsed, Total: diskTotal},
-		Xray:         xrayInfo{State: xrayState, ErrorMsg: xrayErr, Version: xrayVer},
-		PanelVersion: Version,
-		PanelGuid:    a.PanelGuid(),
-		Uptime:       uint64(time.Since(a.startedAt).Seconds()),
-		Loads:        readLoadAvg(),
-		NetIO:        netIO{Up: netUp, Down: netDown},
-		UpdateAvailable: upd.Available,
-		LatestVersion:   upd.Latest,
-		AutoUpdate:      a.autoUpdateEnabled(),
+		CPU:                 readCPUPercent(),
+		CPUCores:            1,
+		Mem:                 memInfo{Current: memUsed, Total: memTotal},
+		Swap:                memInfo{Current: swapTotal - swapFree, Total: swapTotal},
+		Disk:                memInfo{Current: diskUsed, Total: diskTotal},
+		Xray:                xrayInfo{State: xrayState, ErrorMsg: xrayErr, Version: xrayVer},
+		PanelVersion:        Version,
+		PanelGuid:           a.PanelGuid(),
+		Uptime:              uint64(time.Since(a.startedAt).Seconds()),
+		Loads:               readLoadAvg(),
+		NetIO:               netIO{Up: netUp, Down: netDown},
+		UpdateAvailable:     upd.Available,
+		LatestVersion:       upd.Latest,
+		AutoUpdate:          a.autoUpdateEnabled(),
+		CoreUpdateAvailable: upd.CoreAvailable,
+		LatestCoreVersion:   upd.CoreLatest,
 	}
 }
