@@ -1,0 +1,60 @@
+[package]
+name = "x-ui-agent-rs"
+version = "0.2.0"
+edition = "2024"
+description = "Ultra-lightweight single-binary Rust node agent + embedded shoes + hardened remote PTY shell"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "x-ui-agent-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "x-ui-ctl"
+path = "src/bin/x-ui-ctl.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "net", "process", "signal", "time", "sync", "io-util", "io-std", "fs"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+http-body-util = "0.1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+log = "0.4"
+env_logger = "0.11"
+
+# Already in shoes dependency tree — zero extra crate downloads:
+aws-lc-rs = { version = "1", default-features = false }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
+rustls-pki-types = "1"
+pem = "4"
+
+# Embedded shoes fork (no jemalloc, Linux server runner exposed)
+shoes = { git = "https://github.com/zieru/shoes", branch = "micro-net-linux", features = ["ffi"] }
+
+[patch.crates-io]
+rustls = { git = "https://github.com/cfal/rustls", rev = "f1a23c187330386e9e7f14a21dbae368034dc430" }
+blake3 = { git = "https://github.com/cfal/BLAKE3", rev = "5bd8a7ef060bac222502a449bb89b7bdcdb8ec09" }
+h3 = { git = "https://github.com/cfal/h3", rev = "90e3013710e35143d1969dc3421f5951fbe49966" }
+h3-quinn = { git = "https://github.com/cfal/h3", rev = "90e3013710e35143d1969dc3421f5951fbe49966" }
+hickory-net = { git = "https://github.com/cfal/hickory-dns", rev = "93435e55f102ee637eadca89126be85931a804f3" }
+hickory-proto = { git = "https://github.com/cfal/hickory-dns", rev = "93435e55f102ee637eadca89126be85931a804f3" }
+hickory-resolver = { git = "https://github.com/cfal/hickory-dns", rev = "93435e55f102ee637eadca89126be85931a804f3" }
+nix = { git = "https://github.com/nix-rust/nix", rev = "3eae6d68ec6382fef7b38cd58f97458e59a71af9" }
+smoltcp = { git = "https://github.com/cfal/smoltcp", rev = "7ef43e497f575cb0340a43e4f414f0f0b8760bf6" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

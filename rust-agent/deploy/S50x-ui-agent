@@ -1,0 +1,57 @@
+#!/bin/sh
+# BusyBox /etc/init.d/S50x-ui-agent for zieru/micro-net-linux
+# POSIX sh only (no bash, no OpenRC/systemd).
+
+NAME="x-ui-agent-rs"
+DAEMON="/usr/local/bin/x-ui-agent-rs"
+PIDFILE="/var/run/x-ui-agent.pid"
+LOGFILE="/var/log/x-ui-agent.log"
+STATE_DIR="/etc/x-ui-agent"
+LISTEN=":2053"
+TLS_CERT="/etc/x-ui-agent/cert.pem"
+TLS_KEY="/etc/x-ui-agent/key.pem"
+
+[ -x "$DAEMON" ] || exit 0
+
+start() {
+    printf "Starting %s: " "$NAME"
+    mkdir -p "$STATE_DIR"
+    chmod 700 "$STATE_DIR"
+    TLS_ARGS=""
+    if [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ]; then
+        TLS_ARGS="-tls-cert $TLS_CERT -tls-key $TLS_KEY"
+    fi
+    start-stop-daemon -S -b -m -p "$PIDFILE" \
+        -x "$DAEMON" -- \
+        -listen "$LISTEN" \
+        -state-dir "$STATE_DIR" \
+        $TLS_ARGS >> "$LOGFILE" 2>&1
+    echo "OK"
+}
+
+stop() {
+    printf "Stopping %s: " "$NAME"
+    if [ -f "$PIDFILE" ]; then
+        start-stop-daemon -K -p "$PIDFILE" -s TERM
+        rm -f "$PIDFILE"
+    fi
+    echo "OK"
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|reload)
+        stop
+        sleep 1
+        start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
