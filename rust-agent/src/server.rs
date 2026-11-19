@@ -38,10 +38,39 @@ pub struct AgentContext {
     pub engine: Mutex<ProxyEngine>,
     pub raw_stats: Mutex<HashMap<String, StatPair>>,
     pub live_ips: Mutex<HashMap<String, Vec<ClientIpEntry>>>,
+    pub api_failures: Mutex<HashMap<IpAddr, (u32, i64)>>,
     pub shell_guard: Arc<ShellGuard>,
 }
 
+const API_RATE_LIMIT_FAILS: u32 = 5;
+const API_RATE_LIMIT_WINDOW_SECS: i64 = 60;
+
 impl AgentContext {
+    pub async fn is_api_rate_limited(&self, ip: IpAddr, now: i64) -> bool {
+        let mut map = self.api_failures.lock().await;
+        if let Some(&(count, ts)) = map.get(&ip) {
+            if now - ts <= API_RATE_LIMIT_WINDOW_SECS {
+                return count >= API_RATE_LIMIT_FAILS;
+            }
+            map.remove(&ip);
+        }
+        false
+    }
+
+    pub async fn record_api_failure(&self, ip: IpAddr, now: i64) {
+        let mut map = self.api_failures.lock().await;
+        let entry = map.entry(ip).or_insert((0, now));
+        if now - entry.1 > API_RATE_LIMIT_WINDOW_SECS {
+            *entry = (1, now);
+        } else {
+            entry.0 += 1;
+            entry.1 = now;
+        }
+    }
+
+    pub async fn clear_api_failure(&self, ip: IpAddr) {
+        self.api_failures.lock().await.remove(&ip);
+    }
     pub async fn current_token(&self) -> String {
         let mtime = std::fs::metadata(&self.token_path)
             .and_then(|m| m.modified())
@@ -272,6 +301,13 @@ pub async fn handle_request(
     }
 
     // Auth: Bearer token for 3x-ui master node-sync endpoints
+    let now = now_unix();
+    if ctx.is_api_rate_limited(peer_ip, now).await {
+        return Ok(err_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many failed auth attempts",
+        ));
+    }
     let auth_header = req
         .headers()
         .get("authorization")
@@ -280,8 +316,10 @@ pub async fn handle_request(
     let provided = auth_header.strip_prefix("Bearer ").map(|s| s.trim()).unwrap_or("");
     let expected_token = ctx.current_token().await;
     if provided.is_empty() || !constant_time_eq(provided.as_bytes(), expected_token.as_bytes()) {
+        ctx.record_api_failure(peer_ip, now).await;
         return Ok(err_response(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
+    ctx.clear_api_failure(peer_ip).await;
 
     // Reject zstd
     if req

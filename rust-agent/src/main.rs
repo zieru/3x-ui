@@ -255,6 +255,7 @@ fn main() {
             engine: Mutex::new(ProxyEngine::new(config_path)),
             raw_stats: Mutex::new(HashMap::new()),
             live_ips: Mutex::new(HashMap::new()),
+            api_failures: Mutex::new(HashMap::new()),
             shell_guard: Arc::new(ShellGuard::new(shell_pub_path, cli.shell_allow_ip)),
         });
 
