@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use tokio::sync::Mutex;
 
 use crate::engine::ProxyEngine;
@@ -30,7 +30,8 @@ use crate::translator::render_shoes_yaml;
 pub struct AgentContext {
     pub state_dir: PathBuf,
     pub state_path: PathBuf,
-    pub token: String,
+    pub token_path: PathBuf,
+    pub token: Mutex<(String, Option<SystemTime>)>,
     pub base_path: String,
     pub started_at: Instant,
     pub state: Mutex<PersistentState>,
@@ -41,6 +42,28 @@ pub struct AgentContext {
 }
 
 impl AgentContext {
+    pub async fn current_token(&self) -> String {
+        let mtime = std::fs::metadata(&self.token_path)
+            .and_then(|m| m.modified())
+            .ok();
+        let mut guard = self.token.lock().await;
+        if let Some(mt) = mtime {
+            if guard.1 != Some(mt) {
+                if let Ok(raw) = std::fs::read_to_string(&self.token_path) {
+                    let trimmed = raw.trim().to_string();
+                    if !trimmed.is_empty() {
+                        if guard.0 != trimmed {
+                            log::info!("API bearer token reloaded from {}", self.token_path.display());
+                        }
+                        guard.0 = trimmed;
+                        guard.1 = Some(mt);
+                    }
+                }
+            }
+        }
+        guard.0.clone()
+    }
+
     pub async fn apply(&self) -> Result<(), String> {
         let inbounds = {
             let st = self.state.lock().await;
@@ -255,7 +278,8 @@ pub async fn handle_request(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let provided = auth_header.strip_prefix("Bearer ").map(|s| s.trim()).unwrap_or("");
-    if provided.is_empty() || !constant_time_eq(provided.as_bytes(), ctx.token.as_bytes()) {
+    let expected_token = ctx.current_token().await;
+    if provided.is_empty() || !constant_time_eq(provided.as_bytes(), expected_token.as_bytes()) {
         return Ok(err_response(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
 

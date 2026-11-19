@@ -180,22 +180,62 @@ fn main() {
             println!("node token (save it as the node API token on the master): {token}");
         }
 
-        let tls_acceptor = match (&cli.tls_cert, &cli.tls_key) {
-            (Some(c), Some(k)) => match load_tls_acceptor(c, k) {
-                Ok((acc, fp)) => {
-                    log::info!("TLS enabled (cert sha256: {fp})");
-                    Some(acc)
+        let token_mtime = fs::metadata(&token_path).and_then(|m| m.modified()).ok();
+        let tls_cert_path = cli
+            .tls_cert
+            .unwrap_or_else(|| cli.state_dir.join("cert.pem"));
+        let tls_key_path = cli
+            .tls_key
+            .unwrap_or_else(|| cli.state_dir.join("key.pem"));
+
+        struct TlsReloader {
+            cert_path: PathBuf,
+            key_path: PathBuf,
+            cached: Option<(std::time::SystemTime, std::time::SystemTime, TlsAcceptor)>,
+        }
+
+        impl TlsReloader {
+            fn new(cert_path: PathBuf, key_path: PathBuf) -> Self {
+                let mut this = Self {
+                    cert_path,
+                    key_path,
+                    cached: None,
+                };
+                if this.cert_path.exists() && this.key_path.exists() {
+                    let _ = this.get();
+                } else {
+                    log::warn!("TLS cert/key not present yet; serving plain HTTP until cert.pem & key.pem exist");
                 }
-                Err(e) => {
-                    eprintln!("tls init: {e}");
-                    std::process::exit(1);
-                }
-            },
-            _ => {
-                log::warn!("TLS not configured (-tls-cert/-tls-key); running plain HTTP");
-                None
+                this
             }
-        };
+
+            fn get(&mut self) -> Option<TlsAcceptor> {
+                let cm = fs::metadata(&self.cert_path).and_then(|m| m.modified()).ok()?;
+                let km = fs::metadata(&self.key_path).and_then(|m| m.modified()).ok()?;
+                if let Some((ccm, ckm, acc)) = &self.cached {
+                    if *ccm == cm && *ckm == km {
+                        return Some(acc.clone());
+                    }
+                }
+                match load_tls_acceptor(&self.cert_path, &self.key_path) {
+                    Ok((acc, fp)) => {
+                        if self.cached.is_some() {
+                            log::info!("TLS certificate reloaded (cert sha256: {fp})");
+                        } else {
+                            log::info!("TLS enabled (cert sha256: {fp})");
+                        }
+                        self.cached = Some((cm, km, acc.clone()));
+                        Some(acc)
+                    }
+                    Err(e) => {
+                        log::warn!("TLS reload failed (keeping previous state): {e}");
+                        self.cached.as_ref().map(|(_, _, acc)| acc.clone())
+                    }
+                }
+            }
+        }
+
+        let tls_reloader = Arc::new(Mutex::new(TlsReloader::new(tls_cert_path, tls_key_path)));
 
         let base_path = if cli.base_path.ends_with('/') {
             cli.base_path
@@ -207,7 +247,8 @@ fn main() {
         let ctx = Arc::new(AgentContext {
             state_dir: cli.state_dir,
             state_path,
-            token,
+            token_path,
+            token: Mutex::new((token, token_mtime)),
             base_path,
             started_at: Instant::now(),
             state: Mutex::new(st),
@@ -245,7 +286,10 @@ fn main() {
             };
             let peer_ip = remote_addr.ip();
             let req_ctx = ctx.clone();
-            let tls = tls_acceptor.clone();
+            let tls = {
+                let mut rel = tls_reloader.lock().await;
+                rel.get()
+            };
             tokio::task::spawn_local(async move {
                 let svc = service_fn(move |req| handle_request(req_ctx.clone(), peer_ip, req));
                 if let Some(acceptor) = tls {
