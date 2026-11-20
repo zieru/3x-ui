@@ -132,6 +132,34 @@ fn load_tls_acceptor(cert_path: &Path, key_path: &Path) -> Result<(TlsAcceptor, 
     Ok((TlsAcceptor::from(Arc::new(cfg)), fingerprint))
 }
 
+fn ensure_self_signed_tls_cert(cert_path: &Path, key_path: &Path) -> Result<(), String> {
+    if cert_path.exists() || key_path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = cert_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create cert dir: {e}"))?;
+    }
+    if let Some(parent) = key_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create key dir: {e}"))?;
+    }
+
+    let certified = rcgen::generate_simple_self_signed(vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ])
+    .map_err(|e| format!("rcgen self-signed cert: {e}"))?;
+
+    let cert_pem = certified.cert.pem();
+    let key_pem = certified.key_pair.serialize_pem();
+
+    fs::write(key_path, key_pem).map_err(|e| format!("write tls key: {e}"))?;
+    let _ = fs::set_permissions(key_path, fs::Permissions::from_mode(0o600));
+    fs::write(cert_path, cert_pem).map_err(|e| format!("write tls cert: {e}"))?;
+    let _ = fs::set_permissions(cert_path, fs::Permissions::from_mode(0o644));
+    Ok(())
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = parse_args();
@@ -196,6 +224,15 @@ fn main() {
 
         impl TlsReloader {
             fn new(cert_path: PathBuf, key_path: PathBuf) -> Self {
+                if !cert_path.exists() && !key_path.exists() {
+                    match ensure_self_signed_tls_cert(&cert_path, &key_path) {
+                        Ok(()) => log::info!(
+                            "Generated self-signed TLS cert at {}",
+                            cert_path.display()
+                        ),
+                        Err(e) => log::warn!("Failed to auto-generate TLS cert: {e}"),
+                    }
+                }
                 let mut this = Self {
                     cert_path,
                     key_path,
@@ -320,4 +357,25 @@ fn main() {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_generates_and_loads_self_signed_tls_cert() {
+        let dir = std::env::temp_dir().join(format!("xui-tls-test-{}", uuid::Uuid::new_v4()));
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+
+        ensure_self_signed_tls_cert(&cert, &key).expect("generate self-signed cert");
+        assert!(cert.exists());
+        assert!(key.exists());
+
+        let (_acceptor, fp) = load_tls_acceptor(&cert, &key).expect("load generated cert");
+        assert_eq!(fp.len(), 64);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

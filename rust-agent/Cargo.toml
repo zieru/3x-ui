@@ -37,6 +37,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
 rustls-pki-types = "1"
 pem = "4"
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }
 
 # Embedded shoes fork (no jemalloc, Linux server runner exposed)
 shoes = { git = "https://github.com/zieru/shoes", branch = "micro-net-linux", features = ["ffi"] }
